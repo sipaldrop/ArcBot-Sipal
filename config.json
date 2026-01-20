@@ -1,0 +1,14 @@
+{
+    "baseUrl": "https://rewards.arcterminal.ai",
+    "websiteId": "f36e9592-5966-45f8-8b7c-46f343480a78",
+    "organizationId": "78b7ff1e-edf6-4011-aefe-d80f3577e092",
+    "dailyCheckInRuleId": "4dd0c8c2-156f-45d6-bcd8-8431c7aa3683",
+    "postRuleGroupId": "6ee6ff58-45aa-480f-920d-83edea4abdc4",
+    "referralCode": "CKSN93II",
+    "userAgents": [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Safari/605.1.15",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/102.0"
+    ]
+}

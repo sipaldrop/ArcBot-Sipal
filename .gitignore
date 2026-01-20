@@ -1,0 +1,12 @@
+node_modules/
+.env
+accounts.json
+wallet.json
+tokens.json
+database.json
+config.json
+session/
+accounts_template.json
+*.log
+.DS_Store
+setup_github.bat

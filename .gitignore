@@ -1,5 +1,4 @@
-node_modules/
-.env
+# files
 accounts.json
 wallet.json
 tokens.json
@@ -7,4 +6,3 @@ database.json
 session/
 *.log
 .DS_Store
-setup_github.bat

@@ -46,6 +46,106 @@ function delay(seconds) {
   return new Promise(resolve => setTimeout(resolve, seconds * 1000));
 }
 
+// Anti-ban: Human-like random delay with jitter
+function humanDelay(minSeconds, maxSeconds) {
+  const baseDelay = Math.random() * (maxSeconds - minSeconds) + minSeconds;
+  const jitter = (Math.random() - 0.5) * 2; // -1 to +1 second jitter
+  const finalDelay = Math.max(1, baseDelay + jitter);
+  return new Promise(resolve => setTimeout(resolve, finalDelay * 1000));
+}
+
+// Anti-ban: Activity cooldown tracker
+const COOLDOWN_FILE = 'twitter_cooldown.json';
+
+async function loadCooldownData() {
+  try {
+    const data = await fs.readFile(COOLDOWN_FILE, 'utf-8');
+    return JSON.parse(data);
+  } catch {
+    return { accounts: {}, globalLastPost: 0, dailyPostCount: {}, lastResetDate: '' };
+  }
+}
+
+async function saveCooldownData(data) {
+  await fs.writeFile(COOLDOWN_FILE, JSON.stringify(data, null, 2));
+}
+
+// Anti-ban: Check if account is in cooldown
+async function isAccountInCooldown(accountKey) {
+  const data = await loadCooldownData();
+  const now = Date.now();
+  const today = new Date().toISOString().split('T')[0];
+
+  // Reset daily counters if new day
+  if (data.lastResetDate !== today) {
+    data.dailyPostCount = {};
+    data.lastResetDate = today;
+    await saveCooldownData(data);
+  }
+
+  const accountData = data.accounts[accountKey] || { lastPost: 0, postCount: 0 };
+  const dailyPosts = data.dailyPostCount[accountKey] || 0;
+
+  // Anti-ban rules:
+  // 1. Minimum 6-12 hours between posts per account (random) - INCREASED FOR SAFETY
+  const minCooldownHours = 6 + Math.random() * 6; // 6-12 hours
+  const cooldownMs = minCooldownHours * 60 * 60 * 1000;
+  const timeSinceLastPost = now - accountData.lastPost;
+
+  // 2. Maximum 1 post per account per day - STRICTER FOR SAFETY
+  const maxDailyPosts = 1;
+
+  // 3. Global rate limit: 60 seconds between any posts - INCREASED FOR SAFETY
+  const globalCooldown = 60000; // 60 seconds
+  const timeSinceGlobalPost = now - data.globalLastPost;
+
+  if (timeSinceGlobalPost < globalCooldown) {
+    return { inCooldown: true, reason: 'Global rate limit', waitSeconds: Math.ceil((globalCooldown - timeSinceGlobalPost) / 1000) };
+  }
+
+  if (dailyPosts >= maxDailyPosts) {
+    return { inCooldown: true, reason: `Daily limit reached (${dailyPosts}/${maxDailyPosts})`, waitSeconds: 0 };
+  }
+
+  if (timeSinceLastPost < cooldownMs) {
+    const remainingHours = Math.ceil((cooldownMs - timeSinceLastPost) / (60 * 60 * 1000));
+    return { inCooldown: true, reason: `Account cooldown (${remainingHours}h remaining)`, waitSeconds: 0 };
+  }
+
+  return { inCooldown: false };
+}
+
+// Anti-ban: Record successful post
+async function recordPost(accountKey) {
+  const data = await loadCooldownData();
+  const now = Date.now();
+  const today = new Date().toISOString().split('T')[0];
+
+  if (data.lastResetDate !== today) {
+    data.dailyPostCount = {};
+    data.lastResetDate = today;
+  }
+
+  data.accounts[accountKey] = data.accounts[accountKey] || { lastPost: 0, postCount: 0 };
+  data.accounts[accountKey].lastPost = now;
+  data.accounts[accountKey].postCount++;
+
+  data.dailyPostCount[accountKey] = (data.dailyPostCount[accountKey] || 0) + 1;
+  data.globalLastPost = now;
+
+  await saveCooldownData(data);
+}
+
+// Anti-ban: Shuffle array helper
+function shuffleArray(array) {
+  const arr = [...array];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 // Session results tracking
 let sessionResults = {
   accounts: [],
@@ -344,7 +444,16 @@ async function executeDailyCheckin(address, proxy, context, cookies) {
       spinner.warn(chalk.bold.yellowBright(` ${response.data.message || 'Already checked in today'}`));
       return { success: false, message: response.data.message || 'Already claimed' };
     }
-    spinner.succeed(chalk.bold.greenBright(` Check-In Successfully!`));
+
+    // Attempt to extract streak info if available in response
+    let streakMsg = '';
+    if (response.data && response.data.streak) {
+      streakMsg = ` (Streak: ${response.data.streak}/7)`;
+    } else if (response.data && response.data.data && response.data.data.streak) {
+      streakMsg = ` (Streak: ${response.data.data.streak}/7)`;
+    }
+
+    spinner.succeed(chalk.bold.greenBright(` Check-In Successful!${streakMsg}`));
     return { success: true };
   } catch (error) {
     spinner.fail(chalk.bold.redBright(` Failed to execute check-in: ${error.message}`));
@@ -424,126 +533,102 @@ async function checkTaskStatus(userId, proxy, context, cookies, webId = config.w
   }
 }
 
-const tweetVariations = [
-  "Excited about the TheARCTERMINAL project! Tagging @TheARCTERMINAL for the latest updates. Loving the community vibes! #Crypto #Web3",
-  "Just discovered @TheARCTERMINAL and it's amazing! @TheARCTERMINAL is doing great work. Can't wait for more! #Blockchain #DeFi",
-  "Shouting out to @TheARCTERMINAL for the innovative tech. Great potential ahead! #CryptoCommunity",
-  "Having fun with TheARCTERMINAL. Thanks @TheARCTERMINAL for building something cool! #Web3Adventures",
-  "Tagging @TheARCTERMINAL because ARCTERMINAL is my new favorite. Let's grow together! #DeFi #Tokens",
-  "Exploring @TheARCTERMINAL ecosystem. @TheARCTERMINAL is leading the way! Excited for the future. #BlockchainTech",
-  "Big fan of @TheARCTERMINAL. Keep up the awesome work! #CryptoEnthusiast",
-  "Loving the energy around @TheARCTERMINAL. Shoutout to @TheARCTERMINAL for the inspiration! #DeFiJourney",
-  "The future of trading is here with @TheARCTERMINAL. Don't miss out! #Crypto #Trading",
-  "@TheARCTERMINAL is redefining how we interact with DeFi. Incredible progress!",
-  "Keeping my eyes on @TheARCTERMINAL. Serious builder energy here. #Web3",
-  "Just checked out the latest from @TheARCTERMINAL. Highly impressed! #Blockchain",
-  "If you haven't seen @TheARCTERMINAL yet, you're missing out. pure gems. #Alpha",
-  "Bullish on @TheARCTERMINAL! The roadmap looks solid. #CryptoNews",
-  "Community is everything, and @TheARCTERMINAL has a great one. #WAGMI",
-  "Building the future block by block with @TheARCTERMINAL. #Build",
-  "Transparency and innovation at @TheARCTERMINAL. That's what I like to see!",
-  "@TheARCTERMINAL strictly for the culture. Let's go! #NFT #Crypto",
-  "Taking DeFi to the next level with @TheARCTERMINAL. #NextGen",
-  "Secure, fast, and reliable. That's @TheARCTERMINAL. #Security",
-  "Can't wait to see what's next for @TheARCTERMINAL. Always shipping!",
-  "@TheARCTERMINAL making waves in the industry. #Disruption",
-  "Simplicity meets power at @TheARCTERMINAL. A game changer.",
-  "Global adoption starts with projects like @TheARCTERMINAL. #MassAdoption",
-  "Feeling confident about my portfolio with @TheARCTERMINAL. #HODL",
-  "Smart contracts, smarter future. Thanks @TheARCTERMINAL! #SmartMoney",
-  "Joining the revolution with @TheARCTERMINAL. Are you in? #CryptoRevolution",
-  "Every day is a good day to learn more about @TheARCTERMINAL. #DYOR",
-  "Optimizing my strategy with insights from @TheARCTERMINAL. #Analytics",
-  "Privacy and decentralization prioritized by @TheARCTERMINAL. #Privacy",
-  "Connecting the dots in Web3 with @TheARCTERMINAL. #Interoperability",
-  "Yield farming made better with @TheARCTERMINAL. #Yield",
-  "Governance matters, and @TheARCTERMINAL gets it. #DAO",
-  "Scalability is key, and @TheARCTERMINAL is unlocking it. #L2",
-  "Fees too high? Not where @TheARCTERMINAL is going. #LowFees",
-  "Cross-chain magic happening at @TheARCTERMINAL. #CrossChain",
-  "Liquidity looks deep at @TheARCTERMINAL. #Liquidity",
-  "Staking my claim with @TheARCTERMINAL. #Staking",
-  "Passive income goals with @TheARCTERMINAL. #PassiveIncome",
-  "The UX on @TheARCTERMINAL is buttery smooth. #UXDesign",
-  "Developers building on @TheARCTERMINAL are top tier. #Devs",
-  "Ecosystem growth at @TheARCTERMINAL is exponential. #Growth",
-  "Partnerships looking strong for @TheARCTERMINAL. #Partners",
-  "Whitepaper read: Done. @TheARCTERMINAL is solid. #Research",
-  "Tokenomics of @TheARCTERMINAL make sense. #Tokenomics",
-  "Vibing in the @TheARCTERMINAL discord. Great people! #Community",
-  "AMA with @TheARCTERMINAL was super insightful. #AMA",
-  "Let's push boundaries with @TheARCTERMINAL. #Innovation",
-  "Decentralized finance is the future, @TheARCTERMINAL is the vehicle. #DeFiFuture",
-  "Nothing but respect for the @TheARCTERMINAL team.",
-  "Bringing value back to the users with @TheARCTERMINAL.",
-  "Automation at its finest with @TheARCTERMINAL. #Bot",
-  "Efficiency increased 100x thanks to @TheARCTERMINAL.",
-  "Data driven decisions with @TheARCTERMINAL.",
-  "The alpha is always at @TheARCTERMINAL.",
-  "Don't sleep on @TheARCTERMINAL. Seriously.",
-  "Early bird gets the worm with @TheARCTERMINAL. #EarlyAdopter",
-  "Navigating the bear and bull with @TheARCTERMINAL.",
-  "Diamond hands for @TheARCTERMINAL.",
-  "To the moon? No, to Mars with @TheARCTERMINAL!",
-  "Sustainable growth model from @TheARCTERMINAL.",
-  "Real utility, no hype. That's @TheARCTERMINAL.",
-  "Bridging the gap between Web2 and Web3: @TheARCTERMINAL.",
-  "Accessibility for everyone via @TheARCTERMINAL. #Inclusion",
-  "Empowering creators with @TheARCTERMINAL. #CreatorEconomy",
-  "Financial freedom starts with choices like @TheARCTERMINAL.",
-  "Learning something new every day thanks to @TheARCTERMINAL.",
-  "Secure your future with @TheARCTERMINAL.",
-  "The interface on @TheARCTERMINAL is next level.",
-  "Mobile experience for @TheARCTERMINAL is seamless.",
-  "Integration with other protocols? @TheARCTERMINAL does it best.",
-  "Zero downtime with @TheARCTERMINAL. Reliable.",
-  "Support team at @TheARCTERMINAL is super responsive.",
-  "Documentation for @TheARCTERMINAL is crystal clear.",
-  "Open source values at @TheARCTERMINAL. #OpenSource",
-  "Audited and secure. Trusting @TheARCTERMINAL. #Audit",
-  "Gas optimization on point with @TheARCTERMINAL.",
-  "Layer 2 solutions integrated with @TheARCTERMINAL.",
-  "Seamless onboarding experience at @TheARCTERMINAL.",
-  "Education resources from @TheARCTERMINAL are top notch.",
-  "Networking with the best in @TheARCTERMINAL community.",
-  "Strategy and execution: @TheARCTERMINAL nails both.",
-  "Long term vision of @TheARCTERMINAL aligns with mine.",
-  "Diversifying into @TheARCTERMINAL ecosystem.",
-  "Risk management made easier with @TheARCTERMINAL.",
-  "Portfolio tracking via @TheARCTERMINAL is a breeze.",
-  "Real-time updates from @TheARCTERMINAL are crucial.",
-  "Market analysis powered by @TheARCTERMINAL.",
-  "Sentiment analysis says: Bullish on @TheARCTERMINAL.",
-  "Technical analysis confirms @TheARCTERMINAL breakout.",
-  "Fundamental analysis: @TheARCTERMINAL is undervalued.",
-  "Macro outlook favors @TheARCTERMINAL.",
-  "Micro caps to mega caps, @TheARCTERMINAL covers it all.",
-  "Institutional interest in @TheARCTERMINAL is growing.",
-  "Retail traders love @TheARCTERMINAL.",
-  "Whales are accumulating @TheARCTERMINAL.",
-  "Smart money is moving to @TheARCTERMINAL.",
-  "Follow the liquidity to @TheARCTERMINAL.",
-  "Arbitrage opportunities with @TheARCTERMINAL.",
-  "Hitch a ride on the @TheARCTERMINAL rocket.",
-  "FOMO is real when it comes to @TheARCTERMINAL.",
-  "FUD doesn't stick to @TheARCTERMINAL.",
-  "NGMI if you ignore @TheARCTERMINAL.",
-  "LFG! @TheARCTERMINAL taking over.",
-  "Probably nothing... just @TheARCTERMINAL changing the world.",
-  "Few understand this about @TheARCTERMINAL.",
-  "Based and redpilled on @TheARCTERMINAL."
+// Anti-ban: Tweet templates with placeholders for dynamic content
+const tweetTemplates = [
+  "{greeting} @TheARCTERMINAL {adjective}! {reaction} {hashtag}",
+  "{reaction} @TheARCTERMINAL is {adjective}! {ending} {hashtag}",
+  "{prefix} @TheARCTERMINAL {suffix}. {ending}",
+  "{reaction} {adjective} work by @TheARCTERMINAL! {hashtag}",
+  "{greeting}! @TheARCTERMINAL is {adjective}. {hashtag}",
+  "{prefix} about @TheARCTERMINAL? {reaction} {hashtag}",
+  "{reaction} @TheARCTERMINAL! {suffix} {ending}"
 ];
 
+const tweetComponents = {
+  greeting: ['Hey', 'Hello', 'Hi there', 'Yo', 'Greetings', 'Howdy', 'Sup', 'Hey everyone', 'Hi all'],
+  adjective: ['amazing', 'incredible', 'fantastic', 'awesome', 'great', 'solid', 'impressive', 'brilliant', 'outstanding', 'excellent', 'superb', 'remarkable', 'phenomenal', 'exceptional'],
+  reaction: ['Love it!', 'So good!', 'Nice work!', 'Fire!', 'This is it!', 'Nailed it!', 'Impressive!', 'Well done!', 'Keep building!', 'LFG!', 'Bullish!', 'WAGMI!', 'Excited!', 'Hyped!'],
+  verb: ['checked out', 'explored', 'discovered', 'tried', 'tested', 'used', 'experienced', 'reviewed', 'analyzed', 'researched'],
+  noun: ['platform', 'project', 'ecosystem', 'community', 'protocol', 'technology', 'innovation', 'solution', 'product', 'system'],
+  prefix: ['Excited', 'Thrilled', 'Happy', 'Pumped', 'Stoked', 'Curious', 'Interested', 'Fascinated', 'Impressed'],
+  suffix: ['looking forward to more', 'cant wait for updates', 'following closely', 'staying tuned', 'keeping an eye', 'watching this space', 'here for it'],
+  ending: ['The future is bright.', 'More to come!', 'Stay tuned!', 'Watch this space.', 'Big things ahead.', 'Just getting started.', 'This is just the beginning.', ''],
+  hashtag: ['#Crypto', '#Web3', '#DeFi', '#Blockchain', '#Trading', '#CryptoCommunity', '#BuildInPublic', '#Web3Community', '#CryptoTwitter', '']
+};
+
+const randomEmojis = ['🚀', '💎', '🔥', '⚡', '💪', '✨', '🌟', '💫', '🎯', '📈', '🏆', '👀', '💯', '🙌', '👏', ''];
+
+// Anti-ban: Generate unique tweet with randomization
+function generateUniqueTweet() {
+  // 60% chance to use template, 40% chance simple format
+  if (Math.random() < 0.6) {
+    const template = tweetTemplates[Math.floor(Math.random() * tweetTemplates.length)];
+    let tweet = template;
+
+    for (const [key, values] of Object.entries(tweetComponents)) {
+      const placeholder = `{${key}}`;
+      if (tweet.includes(placeholder)) {
+        const randomValue = values[Math.floor(Math.random() * values.length)];
+        tweet = tweet.replace(placeholder, randomValue);
+      }
+    }
+
+    // Add random emoji (40% chance)
+    if (Math.random() > 0.6) {
+      const emoji = randomEmojis[Math.floor(Math.random() * randomEmojis.length)];
+      tweet = Math.random() > 0.5 ? `${emoji} ${tweet}` : `${tweet} ${emoji}`;
+    }
+
+    // Add random number/timestamp variation (40% chance) for uniqueness
+    if (Math.random() < 0.4) {
+      const variations = [
+        ` [${new Date().getHours()}:${String(new Date().getMinutes()).padStart(2, '0')}]`,
+        ` ${Math.floor(Math.random() * 100)}%`,
+        ` #${Math.floor(Math.random() * 1000)}`,
+        ` Day ${Math.floor(Math.random() * 365) + 1}`,
+        ''
+      ];
+      tweet += variations[Math.floor(Math.random() * variations.length)];
+    }
+
+    return tweet.replace(/\s+/g, ' ').trim();
+  }
+
+  // Simple format fallback (reduced set for safety)
+  const simpleFormats = [
+    `${tweetComponents.reaction[Math.floor(Math.random() * tweetComponents.reaction.length)]} @TheARCTERMINAL`,
+    `@TheARCTERMINAL is ${tweetComponents.adjective[Math.floor(Math.random() * tweetComponents.adjective.length)]}`,
+    `${tweetComponents.prefix[Math.floor(Math.random() * tweetComponents.prefix.length)]} about @TheARCTERMINAL!`
+  ];
+
+  return simpleFormats[Math.floor(Math.random() * simpleFormats.length)];
+}
+
 function getRandomTweet() {
-  return tweetVariations[Math.floor(Math.random() * tweetVariations.length)];
+  return generateUniqueTweet();
 }
 
 async function performAutoPostTwitter(account, proxy, context, cookies, userId, ruleId) {
-  const { AppKey: appKey, AppKeySecret: appKeySecret, AccessToken: accessToken, AccessTokenSecret: accessTokenSecret } = account;
+  const { AppKey: appKey, AppKeySecret: appKeySecret, AccessToken: accessToken, AccessTokenSecret: accessTokenSecret, privateKey } = account;
   if (!appKey || !appKeySecret || !accessToken || !accessTokenSecret) {
     logger.warn('Twitter credentials missing or empty. Skipping auto post Twitter.', context);
     return;
   }
+
+  // Anti-ban: Generate unique account key for cooldown tracking
+  const accountKey = privateKey ? privateKey.slice(-10) : `${appKey.slice(-5)}_${accessToken.slice(-5)}`;
+
+  // Anti-ban: Check cooldown before proceeding
+  const cooldownCheck = await isAccountInCooldown(accountKey);
+  if (cooldownCheck.inCooldown) {
+    logger.warn(`Twitter cooldown active: ${cooldownCheck.reason}. Skipping to prevent ban.`, context);
+    return;
+  }
+
+  // Anti-ban: Random pre-action delay (30-90 seconds) - INCREASED FOR SAFETY
+  const preDelay = 30 + Math.random() * 60;
+  logger.info(`Anti-ban: Waiting ${Math.floor(preDelay)}s before Twitter action...`, context);
+  await humanDelay(preDelay, preDelay + 10);
 
   logger.info('Starting auto post Twitter process...', context);
 
@@ -601,6 +686,9 @@ async function performAutoPostTwitter(account, proxy, context, cookies, userId, 
 
       const tweetText = getRandomTweet();
 
+      // Anti-ban: Human-like typing simulation delay
+      await humanDelay(2, 5);
+
       if (attempt === 1) {
         logger.debug('Posting tweet...', context);
       }
@@ -629,10 +717,15 @@ async function performAutoPostTwitter(account, proxy, context, cookies, userId, 
       logger.info(`Posted tweet: ${tweetText}`, context);
       logger.info(`Post URL: ${postUrl}`, context);
 
+      // Anti-ban: Record successful post
+      await recordPost(accountKey);
+
       // Complete task and check status (wrapped to ensure tweet deletion happens)
+      // Anti-ban: Random delay before task completion (10-20 seconds)
       try {
+        await humanDelay(10, 20);
         await completePostTask(ruleId, postUrl, proxy, context, cookies);
-        await delay(10);
+        await humanDelay(8, 15);
 
         const status = await checkTaskStatus(userId, proxy, context, cookies);
         const postStatus = status.find(s => s.loyaltyRuleId === ruleId);
@@ -646,12 +739,19 @@ async function performAutoPostTwitter(account, proxy, context, cookies, userId, 
       }
 
       // Always delete tweet regardless of task completion status, with retry logic
+      // Anti-ban: Wait before deletion to simulate human behavior (Increased for safety)
+      const deleteWait = 60 + Math.random() * 120; // 60-180 seconds
+      logger.info(`Anti-ban: Waiting ${Math.floor(deleteWait)}s before tweet deletion...`, context);
+      await humanDelay(deleteWait, deleteWait + 5);
+
       const MAX_DELETE_RETRIES = 3;
-      const DELETE_RETRY_DELAY = 5000; // ms
+      const DELETE_RETRY_DELAY = 8000; // 8 seconds (increased)
       let deleteSuccess = false;
       let lastDeleteError = null;
       for (let deleteAttempt = 1; deleteAttempt <= MAX_DELETE_RETRIES; deleteAttempt++) {
         try {
+          // Anti-ban: Small delay between delete retries
+          if (deleteAttempt > 1) await humanDelay(5, 10);
           logger.debug(`Deleting tweet... (attempt ${deleteAttempt})`, context);
           const deleteRequestData = {
             url: `https://api.twitter.com/2/tweets/${postId}`,
@@ -674,7 +774,7 @@ async function performAutoPostTwitter(account, proxy, context, cookies, userId, 
           logger.error(`Failed to delete tweet ${postId} (attempt ${deleteAttempt}): ${deleteError.message}`, context);
           if (deleteAttempt < MAX_DELETE_RETRIES) {
             logger.warn(`Retrying tweet deletion in ${DELETE_RETRY_DELAY / 1000} seconds...`, context);
-            await delay(DELETE_RETRY_DELAY);
+            await humanDelay(DELETE_RETRY_DELAY / 1000, DELETE_RETRY_DELAY / 1000 + 3);
           }
         }
       }
@@ -911,7 +1011,10 @@ async function runCycle() {
     if (i < accounts.length - 1) {
       console.log('\n\n');
     }
-    await delay(5);
+    // Anti-ban: Random delay between accounts (10-30 seconds)
+    const accountDelay = 10 + Math.random() * 20;
+    logger.info(`Anti-ban: Waiting ${Math.floor(accountDelay)}s before next account...`, 'System');
+    await humanDelay(accountDelay, accountDelay + 5);
   }
 
   sessionResults.endTime = new Date();

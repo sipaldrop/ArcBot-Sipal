@@ -6,3 +6,6 @@ database.json
 session/
 *.log
 .DS_Store
+ref readme.md
+node_modules/
+twitter_cooldown.json

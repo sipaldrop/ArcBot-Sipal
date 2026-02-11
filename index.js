@@ -212,14 +212,14 @@ function getRandomUserAgent() {
 function getAxiosConfig(proxy, additionalHeaders = {}) {
   const headers = {
     'accept': '*/*',
-    'accept-encoding': 'gzip, deflate, br',
+    'accept-encoding': 'gzip, deflate, br, zstd',
     'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8,id;q=0.7,fr;q=0.6,ru;q=0.5,zh-CN;q=0.4,zh;q=0.3',
     'cache-control': 'no-cache',
-    'content-type': 'application/json',
     'pragma': 'no-cache',
     'priority': 'u=1, i',
+    'origin': config.baseUrl,
     'referer': `${config.baseUrl}/loyalty`,
-    'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Opera";v="124"',
+    'sec-ch-ua': '"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"',
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
     'sec-fetch-dest': 'empty',
@@ -230,7 +230,9 @@ function getAxiosConfig(proxy, additionalHeaders = {}) {
   };
   const axiosConfig = {
     headers,
-    timeout: 60000
+    timeout: 60000,
+    maxRedirects: 5,
+    decompress: true
   };
   if (proxy) {
     axiosConfig.httpsAgent = newAgent(proxy);
@@ -253,25 +255,38 @@ function newAgent(proxy) {
 async function requestWithRetry(method, url, payload = null, config = {}, retries = 3, backoff = 2000, context) {
   for (let i = 0; i < retries; i++) {
     try {
+      // Prevent axios from sending Expect: 100-continue (causes HTTP 417)
+      if (config.headers) {
+        config.headers['Expect'] = '';
+      }
       let response;
       if (method.toLowerCase() === 'get') {
-        response = await axios.get(url, config);
+        // Remove Content-Type for GET requests (servers reject GET with Content-Type)
+        const getConfig = { ...config, headers: { ...config.headers } };
+        delete getConfig.headers['content-type'];
+        delete getConfig.headers['Content-Type'];
+        delete getConfig.headers['Content-Length'];
+        response = await axios.get(url, getConfig);
       } else if (method.toLowerCase() === 'post') {
+        // Ensure POST requests have Content-Type
+        if (!config.headers?.['content-type'] && !config.headers?.['Content-Type']) {
+          config.headers = { ...config.headers, 'content-type': 'application/json' };
+        }
         response = await axios.post(url, payload, config);
       } else {
         throw new Error(`Method ${method} not supported`);
       }
       return response;
     } catch (error) {
-      if (error.response && error.response.status >= 500 && i < retries - 1) {
-        logger.warn(`Retrying ${method.toUpperCase()} ${url} (${i + 1}/${retries}) due to server error`, context);
-        await delay(backoff / 1000);
-        backoff *= 1.5;
-        continue;
+      const status = error.response?.status;
+      // Don't retry on 4xx client errors (except 408, 429, 417) — the request itself is wrong
+      if (status && status >= 400 && status < 500 && ![408, 417, 429].includes(status)) {
+        throw error;
       }
       if (i < retries - 1) {
+        const waitTime = status === 429 ? Math.min(backoff * 3, 30000) : backoff;
         logger.warn(`Retrying ${method.toUpperCase()} ${url} (${i + 1}/${retries})`, context);
-        await delay(backoff / 1000);
+        await delay(waitTime / 1000);
         backoff *= 1.5;
         continue;
       }
@@ -364,12 +379,11 @@ async function createSignedPayload(privateKey, address, nonce) {
 async function fetchNonce(address, proxy, context, refCode = config.referralCode) {
   const url = `${config.baseUrl}/api/auth/csrf`;
   const axiosConfig = getAxiosConfig(proxy, {
-    'Content-Type': 'application/json',
     'Cookie': `referral_code=${refCode}`
   });
   const spinner = ora({ text: 'Fetching nonce...', spinner: 'dots' }).start();
   try {
-    const response = await requestWithRetry('get', url, null, axiosConfig, 3, 2000, context);
+    const response = await requestWithRetry('get', url, null, axiosConfig, 3, 3000, context);
     spinner.stop();
     if (response.data.csrfToken) {
       return { csrfToken: response.data.csrfToken, setCookie: response.headers['set-cookie'] || [] };
@@ -377,7 +391,9 @@ async function fetchNonce(address, proxy, context, refCode = config.referralCode
       throw new Error('Failed to fetch nonce');
     }
   } catch (error) {
-    spinner.fail(chalk.bold.redBright(` Failed to fetch nonce: ${error.message}`));
+    const status = error.response?.status;
+    const statusText = status ? ` (HTTP ${status})` : '';
+    spinner.fail(chalk.bold.redBright(` Failed to fetch nonce${statusText}: ${error.message}`));
     return null;
   }
 }
